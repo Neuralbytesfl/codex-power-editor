@@ -1,0 +1,10 @@
+node_modules/
+coverage/
+dist/
+build/
+.cpx/
+*.log
+*.tgz
+.DS_Store
+*.swp
+*.tmp

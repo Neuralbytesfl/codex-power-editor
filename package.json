@@ -1,0 +1,24 @@
+{
+  "name": "codex-power-editor",
+  "version": "0.1.0",
+  "description": "A tiny terminal code editor with cursor-aware Codex edits.",
+  "type": "module",
+  "bin": {
+    "cpx": "./src/cli.js"
+  },
+  "files": [
+    "cpx",
+    "BENCHMARK_IMPROVEMENTS.md",
+    "src",
+    "scripts"
+  ],
+  "scripts": {
+    "start": "node ./src/cli.js",
+    "test": "node --test",
+    "benchmark": "node scripts/benchmark.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
