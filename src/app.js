@@ -10,6 +10,8 @@ import { extractKnowledge, mergeKnowledge, scanKnowledgePath } from "./indexer.j
 import { inspectPythonModule, pythonImportAliases, pythonMemberSuggestions } from "./python-index.js";
 import { Worker } from "node:worker_threads";
 import { clearRecoverySession, loadRecoverySession, saveRecoverySession, snapshotSession } from "./session.js";
+import { InputDecoder } from "./input.js";
+import { previousCodePoint } from "./unicode.js";
 
 const keys = {
   "\x1b[A":"up", "\x1b[B":"down", "\x1b[C":"right", "\x1b[D":"left",
@@ -51,9 +53,12 @@ export function locateAnchor(text, before, after, fallback = 0) {
 }
 
 export class EditorApp {
-  constructor(filePaths, { input = process.stdin, output = process.stdout } = {}) {
+  constructor(filePaths, { input = process.stdin, output = process.stdout, fileIO = {} } = {}) {
     this.initialFilePaths = (Array.isArray(filePaths) ? filePaths : [filePaths]).map(path => resolve(path));
     this.projectRoot = process.cwd(); this.input = input; this.output = output;
+    this.fileIO = { readFile, writeFile, mkdir, stat, ...fileIO };
+    this.inputDecoder = new InputDecoder();
+    this.escapeTimer = null;
     this.renderer = new Renderer(output); this.tabs = []; this.activeTabIndex = 0;
     this.status = ""; this.prompt = null; this.busy = ""; this.abortController = null;
     this.runPanel = null; this.settingsPanel = null; this.helpPanel = false; this.closed = false; this.clipboard = "";
@@ -103,7 +108,7 @@ export class EditorApp {
     const filePath = resolve(path), existing = this.tabs.findIndex(tab => tab.filePath === filePath);
     if (existing >= 0) { this.saveActiveViewport(); this.activeTabIndex = existing; this.restoreActiveViewport(); this.status = `Switched to ${basename(filePath)}`; return; }
     let text = "", mtimeMs = null, isNew = false;
-    try { const [contents, info] = await Promise.all([readFile(filePath, "utf8"), stat(filePath)]); text = contents; mtimeMs = info.mtimeMs; }
+    try { const [contents, info] = await Promise.all([this.fileIO.readFile(filePath, "utf8"), this.fileIO.stat(filePath)]); text = contents; mtimeMs = info.mtimeMs; }
     catch (error) { if (error.code !== "ENOENT") throw error; isNew = true; }
     this.saveActiveViewport();
     this.tabs.push({ filePath, buffer: new TextBuffer(text), mtimeMs, ignoreExternalUntil: 0, externalChanged: false, viewport: { topLine: 0, leftColumn: 0 }, aiQueue: [], aiRunning: false, aiController: null, aiStatus: "" });
@@ -123,6 +128,38 @@ export class EditorApp {
   render() { this.renderer.draw(this);this.scheduleRecoverySave(); }
 
   handleInput(chunk) {
+    if (this.closed) return;
+    clearTimeout(this.escapeTimer);
+    this.dispatchInput(this.inputDecoder.push(chunk));
+    if (this.inputDecoder.awaitingEscape) {
+      this.escapeTimer = setTimeout(() => this.dispatchInput(this.inputDecoder.flushEscape()), 50);
+      this.escapeTimer.unref?.();
+    }
+  }
+
+  dispatchInput(events) {
+    for (const event of events) {
+      if (this.closed) break;
+      if (event.type === "paste") this.handlePaste(event.value);
+      else this.handleKeyInput(event.value);
+    }
+  }
+
+  handlePaste(value) {
+    if (this.recoveryPanel || this.overwritePanel || this.runPanel || this.fileBrowser || this.helpPanel || this.settingsPanel) return;
+    const text = value.replace(/\r\n?/g, "\n");
+    this.tooltip = null;
+    if (this.prompt) {
+      const singleLine = text.replace(/[\n\t]/g, " ").replace(/[\x00-\x1f\x7f]/g, "");
+      if (this.prompt.kind !== "goto" || /^\d+$/.test(singleLine)) this.prompt.value += singleLine;
+    } else {
+      this.buffer.insert(text);
+      this.status = `Pasted ${text.length} characters`;
+    }
+    this.render();
+  }
+
+  handleKeyInput(chunk) {
     if (this.closed) return;
     if (this.handleMouse(chunk)) return;
     this.tooltip = null;
@@ -183,7 +220,6 @@ export class EditorApp {
     if (chunk === "\x7f" || chunk === "\b") this.buffer.backspace();
     else if (chunk === "\r" || chunk === "\n") this.settings.autoIndent ? this.buffer.newlineWithIndent(this.settings.tabSize) : this.buffer.insert("\n");
     else if (keys[chunk]) this.handleKey(keys[chunk]);
-    else if (chunk.startsWith("\x1b[200~") && chunk.endsWith("\x1b[201~")) this.buffer.insert(chunk.slice(6, -6).replace(/\r\n?/g, "\n"));
     else if (!chunk.includes("\x1b") && !/[\x00-\x08\x0b-\x1f\x7f]/.test(chunk.replace(/[\n\r\t]/g, ""))) this.buffer.insert(chunk.replace(/\r\n?/g, "\n"));
     this.render();
   }
@@ -350,7 +386,7 @@ export class EditorApp {
   openPrompt(kind, value = "", forceFile = false) { this.prompt = { kind, value, forceFile }; this.render(); }
   handlePrompt(chunk) {
     if (chunk === "\x1b") { this.prompt = null; this.status = "Prompt cancelled"; return this.render(); }
-    if (chunk === "\x7f" || chunk === "\b") this.prompt.value = this.prompt.value.slice(0, -1);
+    if (chunk === "\x7f" || chunk === "\b") this.prompt.value = this.prompt.value.slice(0, previousCodePoint(this.prompt.value, this.prompt.value.length));
     else if (chunk === "\r" || chunk === "\n") {
       const request = this.prompt;
       if (request.kind === "goto") { this.prompt = null; const line = parseInt(request.value, 10); if (line > 0) { this.buffer.goToLine(line); this.status = `Jumped to line ${this.buffer.position().line + 1}`; } else this.status = "Line number must be positive"; this.render(); }
@@ -558,8 +594,35 @@ export class EditorApp {
   async save() {
     const tab = this.activeTab;
     if (!tab.filePath) { void this.openSaveBrowser(); return false; }
-    try { await mkdir(dirname(tab.filePath),{recursive:true}); tab.ignoreExternalUntil = Date.now()+1500; await writeFile(tab.filePath,tab.buffer.text); tab.buffer.markSaved(); tab.externalChanged=false; tab.mtimeMs=(await stat(tab.filePath)).mtimeMs; this.learnText(tab.buffer.text); void saveSettings(this.settings); this.status="Saved"; this.render(); return true; }
-    catch (error) { this.status=`Save failed: ${error.message}`; this.render(); return false; }
+    const buffer = tab.buffer, filePath = tab.filePath, text = buffer.text;
+    const previousSave = tab.savePromise;
+    const saving = (async () => {
+      if (previousSave) await previousSave;
+      try {
+        await this.fileIO.mkdir(dirname(filePath), { recursive: true });
+        await this.fileIO.writeFile(filePath, text);
+        const info = await this.fileIO.stat(filePath);
+        if (tab.buffer === buffer && tab.filePath === filePath) {
+          buffer.markSaved(text);
+          tab.externalChanged = false;
+          tab.mtimeMs = info.mtimeMs;
+          tab.ignoreExternalUntil = Date.now() + 1500;
+        }
+        this.learnText(text);
+        if (tab === this.activeTab) this.status = buffer.dirty ? "Saved; newer edits remain unsaved" : "Saved";
+        // A settings failure must not turn a successful source save into a failed one.
+        try { await saveSettings(this.settings); } catch { /* retry on the next save */ }
+        return true;
+      } catch (error) {
+        if (tab === this.activeTab) this.status = `Save failed: ${error.message}`;
+        return false;
+      } finally {
+        if (tab.savePromise === saving) tab.savePromise = null;
+        if (!this.closed) this.render();
+      }
+    })();
+    tab.savePromise = saving;
+    return saving;
   }
   async finishSaveAs(directory,name){
     const target=resolve(directory,name);
@@ -584,10 +647,43 @@ export class EditorApp {
   }
 
   async checkExternalChanges() {
-    if (!this.settings?.watchFiles || this.closed) return;
-    for (const tab of this.tabs) { if (!tab.filePath || Date.now()<tab.ignoreExternalUntil) continue; try { const info=await stat(tab.filePath); if (tab.mtimeMs!==null && info.mtimeMs<=tab.mtimeMs) continue; if(tab.buffer.dirty){tab.externalChanged=true;if(tab===this.activeTab)this.status="File changed on disk; save will overwrite it";}else{const cursor=tab.buffer.cursor;tab.buffer=new TextBuffer(await readFile(tab.filePath,"utf8"));tab.buffer.cursor=Math.min(cursor,tab.buffer.text.length);tab.mtimeMs=info.mtimeMs;if(tab===this.activeTab)this.status="Reloaded external file change";} this.render(); } catch(error){if(error.code!=="ENOENT")this.status=`File watch: ${error.message}`;} }
+    if (!this.settings?.watchFiles || this.closed || this.checkingExternalChanges) return;
+    this.checkingExternalChanges = true;
+    try {
+      for (const tab of this.tabs) {
+        if (!tab.filePath || tab.savePromise || Date.now() < tab.ignoreExternalUntil) continue;
+        const filePath = tab.filePath, buffer = tab.buffer, text = buffer.text;
+        const stillCurrent = () => !this.closed && this.tabs.includes(tab) && tab.filePath === filePath
+          && tab.buffer === buffer && !tab.savePromise && Date.now() >= tab.ignoreExternalUntil;
+        try {
+          const info = await this.fileIO.stat(filePath);
+          if (!stillCurrent() || (tab.mtimeMs !== null && info.mtimeMs <= tab.mtimeMs)) continue;
+          if (!buffer.dirty) {
+            const contents = await this.fileIO.readFile(filePath, "utf8");
+            if (!stillCurrent()) continue;
+            // Typing can resume while the disk read is pending.
+            if (!buffer.dirty && buffer.text === text) {
+              tab.buffer = new TextBuffer(contents);
+              tab.buffer.cursor = Math.min(buffer.cursor, tab.buffer.text.length);
+              tab.mtimeMs = info.mtimeMs;
+              tab.externalChanged = false;
+              if (tab === this.activeTab) this.status = "Reloaded external file change";
+              this.render();
+              continue;
+            }
+          }
+          tab.externalChanged = true;
+          if (tab === this.activeTab) this.status = "File changed on disk; save will overwrite it";
+          this.render();
+        } catch (error) {
+          if (error.code !== "ENOENT") this.status = `File watch: ${error.message}`;
+        }
+      }
+    } finally {
+      this.checkingExternalChanges = false;
+    }
   }
 
   tryQuit() { const count=this.tabs.filter(tab=>tab.buffer.dirty).length, warning=`${count} unsaved tab${count===1?"":"s"} — Ctrl+Q again to discard`; if(count&&this.status!==warning){this.status=warning;return this.render();} this.close(); }
-  close() { if(this.closed)return; this.closed=true; this.abortController?.abort();clearTimeout(this.recoveryTimer);for(const tab of this.tabs){tab.aiQueue=[];tab.aiController?.abort();clearTimeout(tab.diagnosticTimer);tab.diagnosticWorker?.terminate();} clearInterval(this.watchTimer); void Promise.resolve(this.recoveryWritePromise).finally(()=>clearRecoverySession().catch(()=>{}));void saveSettings(this.settings); this.input.setRawMode?.(false);this.input.pause();this.renderer.reset();this.output.write("\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1049l");process.off("SIGINT",this.onSignal);process.off("SIGTERM",this.onSignal); }
+  close() { if(this.closed)return; this.closed=true; clearTimeout(this.escapeTimer);this.abortController?.abort();clearTimeout(this.recoveryTimer);for(const tab of this.tabs){tab.aiQueue=[];tab.aiController?.abort();clearTimeout(tab.diagnosticTimer);tab.diagnosticWorker?.terminate();} clearInterval(this.watchTimer); void Promise.resolve(this.recoveryWritePromise).finally(()=>clearRecoverySession().catch(()=>{}));void saveSettings(this.settings); this.input.setRawMode?.(false);this.input.pause();this.renderer.reset();this.output.write("\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1049l");process.off("SIGINT",this.onSignal);process.off("SIGTERM",this.onSignal); }
 }

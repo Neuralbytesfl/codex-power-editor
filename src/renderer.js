@@ -253,9 +253,7 @@ export class Renderer {
       display += lines[line][raw] === "\t" ? 4 : 1;
       raw++;
     }
-    let lineStart = 0;
-    for (let index = 0; index < line; index++) lineStart += lines[index].length + 1;
-    return lineStart + Math.min(raw, lines[line].length);
+    return buffer.indexAt(line, raw);
   }
 }
 

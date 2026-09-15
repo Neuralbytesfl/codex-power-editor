@@ -92,6 +92,8 @@ Most Linux desktops already include `~/.local/bin` in `PATH`. If yours does not,
 
 Text copied with `Ctrl+C` is also sent through OSC 52, which lets supported terminals place it on the operating-system clipboard. `Ctrl+V` always pastes CPX's internal clipboard. Your terminal's normal paste shortcut—commonly `Ctrl+Shift+V`—can paste text copied from other applications.
 
+Bracketed terminal pastes are collected across input chunks and inserted as one undoable edit. Pasting into a prompt adds text without submitting it. Cursor movement and deletion preserve Unicode surrogate pairs, including individual emoji; composed emoji and combining marks are still edited by code point.
+
 ## Tabs, search, suggestions, and file watching
 
 Open several files at startup with `./cpx one.py two.c three.cpp`, create an empty tab with `Ctrl+N`, or browse the filesystem with `Ctrl+O`. In the browser, use arrows and Enter to navigate, Backspace to visit the parent directory, `.` to show hidden files, `m` to create and enter a new folder, and `n` to create an untitled tab. Saving an untitled tab first opens a navigator for choosing the parent folder. Select `[Use this folder]`, press Enter, and then type only the new filename. A filename containing missing folders, such as `tools/generated/main.py`, creates those parent folders automatically. Selecting an existing file prefills its name, and CPX requires explicit Y/Enter confirmation before overwriting any existing file. Tabs are numbered, the active tab is bracketed, `*` means unsaved, and `!` means a dirty buffer also changed on disk. Each tab preserves its own vertical and horizontal scroll position. When the tab list is wider than the terminal, it collapses around the active tab so the current file never disappears.
@@ -113,6 +115,8 @@ Python member completion understands imports. After `import os`, typing `os.` im
 When hover documentation is enabled, moving the mouse over a supported keyword or built-in displays a compact signature and explanation. CPX also recognizes Python, JavaScript, C, and C++ functions defined in the current file and shows their local signature. Python assignments are inferred too: hovering variables assigned strings, tuples, dictionaries, lists, sets, integers, floats, booleans, or annotated values shows their type. Disable hover documentation from Settings if you prefer terminal-native mouse behavior.
 
 External-file watching uses one low-frequency polling loop for all tabs rather than a watcher per file. Clean buffers reload automatically. Dirty buffers are preserved and marked with `!` so CPX never silently destroys unsaved work.
+
+Each save writes a snapshot of the buffer at the time you press `Ctrl+S`. Edits made while that save is in progress remain marked unsaved, and repeated saves finish in request order. File watching pauses for pending saves and rechecks the buffer after reading disk, preserving edits made during an external reload.
 
 Python, C/C++, and JavaScript-family files receive theme-aware syntax coloring for keywords, strings, numbers, and comments. CPX also caches lightweight unmatched-delimiter diagnostics; the footer reports them and `F8` jumps to each location. Diagnostics wait for a brief typing pause and run in a worker thread, keeping large-file keystrokes responsive. These checks are intentionally fast and local rather than a replacement for a language server.
 
@@ -182,6 +186,8 @@ npm test
 ```
 
 CPX intentionally uses only Node built-ins, so there is no dependency installation step.
+
+Regression tests cover fragmented terminal input, paste undo, Unicode editing, concurrent saves, save failures, and edits made during external-file reloads. Filesystem tests use temporary directories and an isolated settings directory.
 
 Run the reproducible 100,000-line performance check with `npm run benchmark`. See `BENCHMARK_IMPROVEMENTS.md` for the before/after response to the hands-on review.
 

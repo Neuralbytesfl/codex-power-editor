@@ -13,6 +13,46 @@ test("inserts at the cursor and undoes", () => {
   assert.equal(buffer.cursor, 6);
 });
 
+test("backspace removes complete non-BMP characters and undo restores them", () => {
+  const buffer = new TextBuffer("A😀𝄞");
+  buffer.moveFileEnd();
+  buffer.backspace();
+  assert.equal(buffer.text, "A😀");
+  buffer.backspace();
+  assert.equal(buffer.text, "A");
+  buffer.undo();
+  assert.equal(buffer.text, "A😀");
+  buffer.redo();
+  assert.equal(buffer.text, "A");
+});
+
+test("arrow navigation and selection do not split surrogate pairs", () => {
+  const buffer = new TextBuffer("A😀B");
+  buffer.moveRight();
+  assert.equal(buffer.cursor, 1);
+  buffer.startSelection();
+  buffer.moveRight();
+  assert.equal(buffer.cursor, 3);
+  assert.equal(buffer.selectedText(), "😀");
+  buffer.moveLeft();
+  assert.equal(buffer.cursor, 1);
+  buffer.clearSelection();
+  buffer.deleteForward();
+  assert.equal(buffer.text, "AB");
+});
+
+test("vertical and word navigation keep Unicode character boundaries", () => {
+  const buffer = new TextBuffer("ab\n😀");
+  buffer.cursor = 1;
+  buffer.moveVertical(1);
+  assert.equal(buffer.cursor, 3);
+  buffer.moveWordRight();
+  assert.equal(buffer.cursor, 5);
+  buffer.moveWordLeft();
+  assert.equal(buffer.cursor, 3);
+  assert.equal(buffer.indexAt(1, 1), 3);
+});
+
 test("redoes an undone edit and clears redo after a new edit", () => {
   const buffer=new TextBuffer("a");buffer.cursor=1;buffer.insert("b");buffer.undo();
   assert.equal(buffer.redo(),true);assert.equal(buffer.text,"ab");

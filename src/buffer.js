@@ -1,3 +1,5 @@
+import { codePointStart, nextCodePoint, previousCodePoint } from "./unicode.js";
+
 export class TextBuffer {
   constructor(text = "") {
     this.text = text.replace(/\r\n/g, "\n");
@@ -29,7 +31,10 @@ export class TextBuffer {
 
   invalidateCache() { this._cacheText=null;this._linesCache=null;this._startsCache=null; }
   trimHistory(collection=this.history) { const limit=Math.max(2,Math.min(200,Math.floor(32_000_000/Math.max(1,this.text.length))));while(collection.length>limit)collection.shift(); }
-  markSaved() { this.savedText=this.text;this.dirty=false; }
+  markSaved(text = this.text) {
+    this.savedText = text;
+    this.dirty = this.text !== text;
+  }
 
   replaceTextRange(start,end,value) {
     const old=this.text,cacheValid=this._cacheText===old&&this._linesCache&&this._startsCache;
@@ -99,9 +104,9 @@ export class TextBuffer {
     }
     if (this.cursor === 0) return;
     this.remember();
-    const width = this.text.codePointAt(this.cursor - 1) > 0xffff ? 2 : 1;
-    this.replaceTextRange(this.cursor-width,this.cursor,"");
-    this.cursor -= width;
+    const start = previousCodePoint(this.text, this.cursor);
+    this.replaceTextRange(start, this.cursor, "");
+    this.cursor = start;
     this.selectionAnchor = null;
     this.preferredColumn = null;
   }
@@ -114,8 +119,7 @@ export class TextBuffer {
     }
     if (this.cursor >= this.text.length) return;
     this.remember();
-    const width = this.text.codePointAt(this.cursor) > 0xffff ? 2 : 1;
-    this.replaceTextRange(this.cursor,this.cursor+width,"");
+    this.replaceTextRange(this.cursor, nextCodePoint(this.text, this.cursor), "");
   }
 
   deleteLine() {
@@ -224,16 +228,16 @@ export class TextBuffer {
   indexAt(line, column) {
     const lines = this.lines();
     const targetLine = Math.max(0, Math.min(line, lines.length - 1));
-    return this._startsCache[targetLine] + Math.min(column, lines[targetLine].length);
+    return codePointStart(this.text, this._startsCache[targetLine] + Math.max(0, Math.min(column, lines[targetLine].length)));
   }
 
   moveLeft() {
-    if (this.cursor > 0) this.cursor--;
+    this.cursor = previousCodePoint(this.text, this.cursor);
     this.preferredColumn = null;
   }
 
   moveRight() {
-    if (this.cursor < this.text.length) this.cursor++;
+    this.cursor = nextCodePoint(this.text, this.cursor);
     this.preferredColumn = null;
   }
 
@@ -269,7 +273,7 @@ export class TextBuffer {
     if (this.cursor === 0) return;
     const before = this.text.slice(0, this.cursor);
     const match = before.match(/\s*[^\sA-Za-z0-9_]*[A-Za-z0-9_]+\s*$/);
-    this.cursor = match ? this.cursor - match[0].length : Math.max(0, this.cursor - 1);
+    this.cursor = match ? this.cursor - match[0].length : previousCodePoint(this.text, this.cursor);
     this.preferredColumn = null;
   }
 
@@ -277,7 +281,7 @@ export class TextBuffer {
     if (this.cursor >= this.text.length) return;
     const after = this.text.slice(this.cursor);
     const match = after.match(/^\s*[^\sA-Za-z0-9_]*[A-Za-z0-9_]+/);
-    this.cursor = match ? this.cursor + match[0].length : Math.min(this.text.length, this.cursor + 1);
+    this.cursor = match ? this.cursor + match[0].length : nextCodePoint(this.text, this.cursor);
     this.preferredColumn = null;
   }
 

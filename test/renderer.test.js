@@ -1,6 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { colorSchemes, formatTabStrip, wrapOutput } from "../src/renderer.js";
+import { colorSchemes, formatTabStrip, wrapOutput, Renderer } from "../src/renderer.js";
+import { TextBuffer } from "../src/buffer.js";
+
+test("mouse positions do not split an emoji surrogate pair", () => {
+  const renderer = new Renderer({ columns: 80, rows: 24 });
+  const buffer = new TextBuffer("A😀B");
+  assert.equal(renderer.indexAtScreen(7, 2, buffer), 1);
+  assert.equal(renderer.indexAtScreen(8, 2, buffer), 3);
+});
 
 function tab(name, dirty = false, externalChanged = false) {
   return { filePath: `/tmp/${name}`, buffer: { dirty }, externalChanged };
